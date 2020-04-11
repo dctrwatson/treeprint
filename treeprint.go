@@ -4,7 +4,6 @@ package treeprint
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"reflect"
 )
 
@@ -37,8 +36,19 @@ type Tree interface {
 	// Bytes renders the tree or subtree as byteslice.
 	Bytes() []byte
 
+	GetValue() Value
 	SetValue(value Value)
+	GetMetaValue() MetaValue
 	SetMetaValue(meta MetaValue)
+
+	Walk(TreeWalkFn) error
+}
+
+type TreeWalkFn func(v *Vertex, level int) error
+
+type Vertex struct {
+	*node
+	Level int
 }
 
 type node struct {
@@ -123,28 +133,80 @@ func (n *node) FindByValue(value Value) Tree {
 	return nil
 }
 
+func (n *node) Walk(walkFn TreeWalkFn) error {
+	vertices := []*Vertex{&Vertex{n, 0}}
+
+	for len(vertices) > 0 {
+		n := len(vertices)
+		v := vertices[n-1]
+		vertices = vertices[:n-1]
+
+		if err := walkFn(v, v.Level); err != nil {
+			return err
+		}
+
+		for i := len(v.node.Nodes) - 1; i >= 0; i-- {
+			vertices = append(vertices, &Vertex{v.node.Nodes[i], v.Level + 1})
+		}
+	}
+
+	return nil
+}
+
 func (n *node) Bytes() []byte {
 	buf := new(bytes.Buffer)
-	level := 0
-	var levelsEnded []int
+	levelSize := map[int]int{
+		1: len(n.Nodes),
+	}
+
 	if n.Root == nil {
 		if n.Meta != nil {
 			buf.WriteString(fmt.Sprintf("[%v]  %v", n.Meta, n.Value))
 		} else {
-			buf.WriteString(fmt.Sprintf("%v",n.Value))
+			buf.WriteString(fmt.Sprintf("%v", n.Value))
 		}
 		buf.WriteByte('\n')
-	} else {
-		edge := EdgeTypeMid
-		if len(n.Nodes) == 0 {
-			edge = EdgeTypeEnd
-			levelsEnded = append(levelsEnded, level)
+	}
+
+	n.Walk(func(v *Vertex, level int) error {
+		// Already did the 0-th node
+		if level == 0 {
+			return nil
 		}
-		printValues(buf, 0, levelsEnded, edge, n.Meta, n.Value)
-	}
-	if len(n.Nodes) > 0 {
-		printNodes(buf, level, levelsEnded, n.Nodes)
-	}
+		// Decrement counter for current level
+		levelSize[level]--
+		// Save counter for next level
+		if len(v.Nodes) > 0 {
+			levelSize[level+1] = len(v.Nodes)
+		}
+
+		// If there are no more nodes at this level, use end edge
+		var edge EdgeType
+		if levelSize[level] == 0 {
+			edge = EdgeTypeEnd
+		} else {
+			edge = EdgeTypeMid
+		}
+
+		// For every level, indent
+		for i := 1; i < level; i++ {
+			if levelSize[i] > 0 {
+				// If level has nodes, continue its link
+				fmt.Fprintf(buf, "%s%c%c ", EdgeTypeLink, '\u00A0', '\u00A0')
+			} else {
+				// If not, just print empty padding
+				fmt.Fprint(buf, "    ")
+			}
+		}
+
+		if v.Meta != nil {
+			fmt.Fprintf(buf, "%s [%v]  %v\n", edge, v.Meta, v.Value)
+		} else {
+			fmt.Fprintf(buf, "%s %v\n", edge, v.Value)
+		}
+		return nil
+	})
+
 	return buf.Bytes()
 }
 
@@ -152,62 +214,28 @@ func (n *node) String() string {
 	return string(n.Bytes())
 }
 
-func (n *node) SetValue(value Value){
+func (n *node) SetValue(value Value) {
 	n.Value = value
 }
 
-func (n *node) SetMetaValue(meta MetaValue){
+func (n *node) GetValue() Value {
+	return n.Value
+}
+
+func (n *node) SetMetaValue(meta MetaValue) {
 	n.Meta = meta
 }
 
-func printNodes(wr io.Writer,
-	level int, levelsEnded []int, nodes []*node) {
-
-	for i, node := range nodes {
-		edge := EdgeTypeMid
-		if i == len(nodes)-1 {
-			levelsEnded = append(levelsEnded, level)
-			edge = EdgeTypeEnd
-		}
-		printValues(wr, level, levelsEnded, edge, node.Meta, node.Value)
-		if len(node.Nodes) > 0 {
-			printNodes(wr, level+1, levelsEnded, node.Nodes)
-		}
-	}
-}
-
-func printValues(wr io.Writer,
-	level int, levelsEnded []int, edge EdgeType, meta MetaValue, val Value) {
-
-	for i := 0; i < level; i++ {
-		if isEnded(levelsEnded, i) {
-			fmt.Fprint(wr, "    ")
-			continue
-		}
-		fmt.Fprintf(wr, "%s   ", EdgeTypeLink)
-	}
-	if meta != nil {
-		fmt.Fprintf(wr, "%s [%v]  %v\n", edge, meta, val)
-		return
-	}
-	fmt.Fprintf(wr, "%s %v\n", edge, val)
-}
-
-func isEnded(levelsEnded []int, level int) bool {
-	for _, l := range levelsEnded {
-		if l == level {
-			return true
-		}
-	}
-	return false
+func (n *node) GetMetaValue() MetaValue {
+	return n.Meta
 }
 
 type EdgeType string
 
 var (
-	EdgeTypeLink  EdgeType = "│"
-	EdgeTypeMid   EdgeType = "├──"
-	EdgeTypeEnd   EdgeType = "└──"
+	EdgeTypeLink EdgeType = "│"
+	EdgeTypeMid  EdgeType = "├──"
+	EdgeTypeEnd  EdgeType = "└──"
 )
 
 func New() Tree {
